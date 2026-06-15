@@ -34,9 +34,40 @@ class TieredPricing(PricingStrategy):
     """Charges across multiple price tiers based on cumulative quantity."""
 
     def __init__(self, tiers: list[Tier]) -> None:
-        # TODO Day 1
-        raise NotImplementedError("Day 1: implement TieredPricing.__init__")
+        if not tiers:
+            raise ValueError("At least one tier is required")
+        
+        for i in range(len(tiers) - 1):
+            if tiers[i+1].from_units != tiers[i].to_units:
+                raise ValueError("Tiers must be contiguous and non-overlapping")
+            tiers[i].unit_price._check_same_currency(tiers[i+1].unit_price)
+
+        for i in range(len(tiers) - 1):
+            if tiers[i].to_units is None:
+                raise ValueError("Only the last tier can have to_units=None")
+            
+        if tiers[-1].to_units is not None:
+            raise ValueError("The last tier must have to_units=None")
+        
+        self.tiers = tiers
 
     def calculate(self, quantity: int) -> Money:
-        # TODO Day 1
-        raise NotImplementedError("Day 1: implement TieredPricing.calculate")
+        if quantity < 0:
+            raise ValueError("Quantity must be non-negative")
+        
+        currency = self.tiers[0].unit_price.currency
+        total = Money.zero(currency)
+
+        for tier in self.tiers:
+            units_in_tier = 0
+
+            if tier.to_units is None:
+                if quantity > tier.from_units:
+                    units_in_tier = quantity - tier.from_units
+            else:
+                if quantity > tier.from_units:
+                    units_in_tier = min(quantity, tier.to_units) - tier.from_units
+
+            total += tier.unit_price * units_in_tier
+
+        return total

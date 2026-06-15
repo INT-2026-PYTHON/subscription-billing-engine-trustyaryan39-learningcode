@@ -18,7 +18,7 @@ From the repository root, run:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/Scripts/activate
 pip install -e ".[dev]"
 cd billing_engine_starter
 pytest -v
