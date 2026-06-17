@@ -362,8 +362,12 @@ class SubscriptionRepository:
     # ------------------------------------------------------------------
     def update_period(self, subscription_id: int, new_start: date, new_end: date) -> None:
         # TODO Day 3.
-        # Hint: q.update_subscription_period(...)
-        raise NotImplementedError("Day 3: implement SubscriptionRepository.update_period")
+        
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET current_period_start=?, current_period_end=? WHERE id=?",
+                (new_start.isoformat(), new_end.isoformat(), subscription_id)
+            )
 
     def update_status(
         self,
@@ -372,8 +376,12 @@ class SubscriptionRepository:
         past_due_since: Optional[date] = None,
     ) -> None:
         # TODO Day 3.
-        # Hint: q.update_subscription_status(...)
-        raise NotImplementedError("Day 3: implement SubscriptionRepository.update_status")
+        
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET status=?, past_due_since=? WHERE id=?",
+                (new_status.value, past_due_since.isoformat() if past_due_since else None, subscription_id)
+            )
 
     def update_plan(self, subscription_id: int, new_plan_id: int) -> None:
         # TODO Day 4.
@@ -486,7 +494,7 @@ class InvoiceRepository:
 
     def count_for_subscription(self, subscription_id: int) -> int:
         # TODO Day 3.
-        # Hint: q.count_invoices_for_subscription(...)
+
         with self.db.connect() as conn:
             count = q.count_invoices_for_subscription(conn, subscription_id)
         return count
@@ -581,13 +589,47 @@ class LedgerRepository:
 
     def add(self, entry: LedgerEntry) -> LedgerEntry:
         # TODO Day 3.
-        # Hint: q.insert_ledger_entry(...)
-        raise NotImplementedError("Day 3: implement LedgerRepository.add")
+        
+        with self.db.transaction() as conn:
+            entry_id = conn.execute(
+                """
+                INSERT INTO ledger_entries 
+                (invoice_id, customer_id, amount, currency, direction, reason)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (entry.invoice_id, entry.customer_id, entry.amount.to_storage(), 
+                entry.amount.currency, entry.direction.value, entry.reason)
+            ).lastrowid
+        return LedgerEntry(
+            id=entry_id,
+            invoice_id=entry.invoice_id,
+            customer_id=entry.customer_id,
+            amount=entry.amount,
+            direction=entry.direction,
+            reason=entry.reason,
+            created_at=None
+        )
 
     def list_for_customer(self, customer_id: int) -> list[LedgerEntry]:
         # TODO Day 3.
-        # Hint: q.select_ledger_for_customer(...)
-        raise NotImplementedError("Day 3: implement LedgerRepository.list_for_customer")
+        
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ledger_entries WHERE customer_id=? ORDER BY created_at, id",
+                (customer_id,)
+            ).fetchall()
+        return [
+            LedgerEntry(
+                id=row["id"],
+                invoice_id=row["invoice_id"],
+                customer_id=row["customer_id"],
+                amount=Money(row["amount"], row["currency"]),
+                direction=LedgerDirection(row["direction"]),
+                reason=row["reason"],
+                created_at=row["created_at"]  # datetime from DB
+            )
+            for row in rows
+        ]
 
     # These two methods are intentionally implemented to REJECT — do not override.
     def update(self, *args, **kwargs):
@@ -620,15 +662,35 @@ class PaymentAttemptRepository:
         next_retry_at: Optional[datetime],
     ) -> int:
         # TODO Day 3.
-        # Hint: q.insert_payment_attempt(...)
-        raise NotImplementedError("Day 3: implement PaymentAttemptRepository.add")
+        
+        with self.db.transaction() as conn:
+            attempt_id = conn.execute(
+                """
+                INSERT INTO payment_attempts 
+                (invoice_id, attempt_no, status, failure_reason, next_retry_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (invoice_id, attempt_no, status, failure_reason, 
+                next_retry_at.isoformat() if next_retry_at else None)
+            ).lastrowid
+        return attempt_id
 
     def list_for_invoice(self, invoice_id: int) -> list[dict]:
         # TODO Day 3.
-        # Hint: q.select_attempts_for_invoice(...)
-        raise NotImplementedError("Day 3: implement PaymentAttemptRepository.list_for_invoice")
+
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM payment_attempts WHERE invoice_id=? ORDER BY attempt_no",
+                (invoice_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def count_for_invoice(self, invoice_id: int) -> int:
         # TODO Day 3.
-        # Hint: q.count_attempts_for_invoice(...)
-        raise NotImplementedError("Day 3: implement PaymentAttemptRepository.count_for_invoice")
+
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM payment_attempts WHERE invoice_id=?",
+                (invoice_id,)
+            ).fetchone()
+        return row["cnt"]

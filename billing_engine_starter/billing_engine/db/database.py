@@ -21,12 +21,20 @@ from typing import Iterator
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+class ManagedConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, factory=ManagedConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn

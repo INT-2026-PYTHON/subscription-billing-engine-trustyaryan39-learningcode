@@ -42,12 +42,19 @@ class ScriptedGateway(PaymentGateway):
 
     def __init__(self, results: list[PaymentResult]) -> None:
         # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.__init__")
+
+        self._results = list(results)
+        self._index = 0
 
     def charge(self, invoice: Invoice) -> PaymentResult:
         # TODO Day 3
-        raise NotImplementedError("Day 3: implement ScriptedGateway.charge")
 
+        if self._index < len(self._results):
+            result = self._results[self._index]
+            self._index += 1
+            return result
+        raise ValueError("No more payment results available")
+    
 
 # ----------------------------------------------------------------
 # Fake-random — for the CLI demo
@@ -57,8 +64,16 @@ class FakeRandomGateway(PaymentGateway):
 
     def __init__(self, success_rate: float = 0.7, seed: Optional[int] = None) -> None:
         # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.__init__")
+        
+        import random
+
+        self.success_rate = success_rate
+        self._random = random.Random(seed)
+
 
     def charge(self, invoice: Invoice) -> PaymentResult:
         # TODO Day 3
-        raise NotImplementedError("Day 3: implement FakeRandomGateway.charge")
+        
+        if self._random.random() < self.success_rate:
+            return PaymentResult(True)
+        return PaymentResult(False, "FAKE_RANDOM_FAILURE")
