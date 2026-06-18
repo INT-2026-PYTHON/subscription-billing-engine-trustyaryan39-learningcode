@@ -6,7 +6,7 @@ advances the subscription period. Must be IDEMPOTENT (safe to run twice).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 from typing import Callable, Optional
 
 from billing_engine.db import (
@@ -182,5 +182,101 @@ class BillingCycle:
     # --------------------------------------------------------
     def upgrade_subscription(self, subscription_id: int, new_plan_id: int, switch_date: date) -> None:
         """Mid-cycle upgrade — Day 4 stretch."""
-        # TODO Day 4
-        raise NotImplementedError("Day 4: implement BillingCycle.upgrade_subscription")
+        import sqlite3
+
+        from billing_engine.billing.proration import compute_proration
+        from billing_engine.db import queries as q
+        from billing_engine.models import InvoiceStatus, LineItemKind, LedgerDirection
+
+        subscription = self.subscription_repo.get(subscription_id)
+        if subscription is None:
+            raise LookupError(f"Subscription {subscription_id} not found")
+
+        old_plan = self.plan_repo.get(subscription.plan_id)
+        new_plan = self.plan_repo.get(new_plan_id)
+        customer = self.customer_repo.get(subscription.customer_id)
+        if old_plan is None or new_plan is None or customer is None:
+            raise LookupError("Unable to load subscription, plan, or customer for upgrade")
+
+        old_strategy = self.strategy_factory(old_plan)
+        new_strategy = self.strategy_factory(new_plan)
+        old_plan_price = old_strategy.calculate(0)
+        new_plan_price = new_strategy.calculate(0)
+
+        tax_calc, tax_context = self.tax_factory(customer)
+        proration = compute_proration(
+            old_plan_price=old_plan_price,
+            new_plan_price=new_plan_price,
+            period_start=subscription.current_period_start,
+            period_end=subscription.current_period_end,
+            switch_date=switch_date,
+            tax_calc=tax_calc,
+            tax_context=tax_context,
+        )
+
+        credit_total = proration.credit_amount
+        charge_total = proration.charge_amount
+        tax_total = proration.charge_tax - proration.credit_tax
+        invoice_total = (charge_total - credit_total) + tax_total
+
+        try:
+            with self.db.transaction() as conn:
+                invoice_id = q.insert_invoice(
+                    conn,
+                    subscription.id,
+                    switch_date.isoformat(),
+                    subscription.current_period_end.isoformat(),
+                    invoice_total.currency,
+                    charge_total.to_storage(),
+                    credit_total.to_storage(),
+                    tax_total.to_storage(),
+                    invoice_total.to_storage(),
+                    InvoiceStatus.ISSUED.value,
+                    datetime.combine(switch_date, time.min).isoformat(timespec="seconds"),
+                    None,
+                )
+
+                q.insert_invoice_line_item(
+                    conn,
+                    invoice_id,
+                    "Proration credit",
+                    (-proration.credit_amount).to_storage(),
+                    LineItemKind.PRORATION_CREDIT.value,
+                )
+                q.insert_invoice_line_item(
+                    conn,
+                    invoice_id,
+                    "Proration charge",
+                    proration.charge_amount.to_storage(),
+                    LineItemKind.PRORATION_CHARGE.value,
+                )
+                if not proration.credit_tax.is_zero():
+                    q.insert_invoice_line_item(
+                        conn,
+                        invoice_id,
+                        "Proration credit tax",
+                        (-proration.credit_tax).to_storage(),
+                        LineItemKind.TAX.value,
+                    )
+                if not proration.charge_tax.is_zero():
+                    q.insert_invoice_line_item(
+                        conn,
+                        invoice_id,
+                        "Proration charge tax",
+                        proration.charge_tax.to_storage(),
+                        LineItemKind.TAX.value,
+                    )
+
+                q.insert_ledger_entry(
+                    conn,
+                    invoice_id,
+                    customer.id,
+                    invoice_total.to_storage(),
+                    invoice_total.currency,
+                    LedgerDirection.DEBIT.value,
+                    f"Proration for subscription {subscription_id}",
+                )
+
+                q.update_subscription_plan(conn, subscription_id, new_plan_id)
+        except sqlite3.IntegrityError:
+            raise

@@ -364,9 +364,11 @@ class SubscriptionRepository:
         # TODO Day 3.
         
         with self.db.transaction() as conn:
-            conn.execute(
-                "UPDATE subscriptions SET current_period_start=?, current_period_end=? WHERE id=?",
-                (new_start.isoformat(), new_end.isoformat(), subscription_id)
+            q.update_subscription_period(
+                conn,
+                subscription_id,
+                new_start.isoformat(),
+                new_end.isoformat(),
             )
 
     def update_status(
@@ -378,15 +380,17 @@ class SubscriptionRepository:
         # TODO Day 3.
         
         with self.db.transaction() as conn:
-            conn.execute(
-                "UPDATE subscriptions SET status=?, past_due_since=? WHERE id=?",
-                (new_status.value, past_due_since.isoformat() if past_due_since else None, subscription_id)
+            q.update_subscription_status(
+                conn,
+                subscription_id,
+                new_status.value,
+                past_due_since.isoformat() if past_due_since else None,
             )
 
     def update_plan(self, subscription_id: int, new_plan_id: int) -> None:
         # TODO Day 4.
-        # Hint: q.update_subscription_plan(...)
-        raise NotImplementedError("Day 4: implement SubscriptionRepository.update_plan")
+        with self.db.transaction() as conn:
+            q.update_subscription_plan(conn, subscription_id, new_plan_id)
 
 
 # ============================================================
@@ -475,9 +479,19 @@ class InvoiceRepository:
         
         with self.db.connect() as conn:
             row = q.select_invoice_by_id(conn, invoice_id)
-        if row is None:
-            return None
-        currency = row["currency"]
+            if row is None:
+                return None
+            currency = row["currency"]
+            line_items = [
+                InvoiceLineItem(
+                    id=item["id"],
+                    invoice_id=item["invoice_id"],
+                    description=item["description"],
+                    amount=Money(item["amount"], currency),
+                    kind=LineItemKind(item["kind"]),
+                )
+                for item in q.select_line_items_for_invoice(conn, invoice_id)
+            ]
         return Invoice(
             id=row["id"],
             subscription_id=row["subscription_id"],
@@ -490,6 +504,7 @@ class InvoiceRepository:
             status=InvoiceStatus(row["status"]),
             issued_at=datetime.fromisoformat(row["issued_at"]) if row["issued_at"] else None,
             pdf_path=row["pdf_path"],
+            line_items=line_items,
         )
 
     def count_for_subscription(self, subscription_id: int) -> int:
@@ -497,22 +512,22 @@ class InvoiceRepository:
 
         with self.db.connect() as conn:
             count = q.count_invoices_for_subscription(conn, subscription_id)
-        return count
+        return int(count)
 
     def mark_paid(self, invoice_id: int) -> None:
         # TODO Day 4.
-        # Hint: q.update_invoice_status(..., "PAID")
-        raise NotImplementedError("Day 4: implement InvoiceRepository.mark_paid")
+        with self.db.transaction() as conn:
+            q.update_invoice_status(conn, invoice_id, InvoiceStatus.PAID.value)
 
     def mark_failed(self, invoice_id: int) -> None:
         # TODO Day 4.
-        # Hint: q.update_invoice_status(..., "FAILED")
-        raise NotImplementedError("Day 4: implement InvoiceRepository.mark_failed")
+        with self.db.transaction() as conn:
+            q.update_invoice_status(conn, invoice_id, InvoiceStatus.FAILED.value)
 
     def set_pdf_path(self, invoice_id: int, path: str) -> None:
         # TODO Day 4.
-        # Hint: q.update_invoice_pdf_path(...)
-        raise NotImplementedError("Day 4: implement InvoiceRepository.set_pdf_path")
+        with self.db.transaction() as conn:
+            q.update_invoice_pdf_path(conn, invoice_id, path)
 
 
 class InvoiceLineItemRepository:
@@ -548,14 +563,11 @@ class InvoiceLineItemRepository:
     def list_for_invoice(self, invoice_id: int) -> list[InvoiceLineItem]:
         # TODO Day 2.
         
-        invoice_repo = InvoiceRepository(self.db)
-        invoice = invoice_repo.get(invoice_id)
-        if invoice is None:
-            return []
-        
-        currency = invoice.subtotal.currency
-        
         with self.db.connect() as conn:
+            invoice = q.select_invoice_by_id(conn, invoice_id)
+            if invoice is None:
+                return []
+            currency = invoice["currency"]
             rows = q.select_line_items_for_invoice(conn, invoice_id)
         
         return [
@@ -591,15 +603,15 @@ class LedgerRepository:
         # TODO Day 3.
         
         with self.db.transaction() as conn:
-            entry_id = conn.execute(
-                """
-                INSERT INTO ledger_entries 
-                (invoice_id, customer_id, amount, currency, direction, reason)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (entry.invoice_id, entry.customer_id, entry.amount.to_storage(), 
-                entry.amount.currency, entry.direction.value, entry.reason)
-            ).lastrowid
+            entry_id = q.insert_ledger_entry(
+                conn,
+                entry.invoice_id,
+                entry.customer_id,
+                entry.amount.to_storage(),
+                entry.amount.currency,
+                entry.direction.value,
+                entry.reason,
+            )
         return LedgerEntry(
             id=entry_id,
             invoice_id=entry.invoice_id,
@@ -607,17 +619,14 @@ class LedgerRepository:
             amount=entry.amount,
             direction=entry.direction,
             reason=entry.reason,
-            created_at=None
+            created_at=None,
         )
 
     def list_for_customer(self, customer_id: int) -> list[LedgerEntry]:
         # TODO Day 3.
         
         with self.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM ledger_entries WHERE customer_id=? ORDER BY created_at, id",
-                (customer_id,)
-            ).fetchall()
+            rows = q.select_ledger_for_customer(conn, customer_id)
         return [
             LedgerEntry(
                 id=row["id"],
@@ -626,7 +635,7 @@ class LedgerRepository:
                 amount=Money(row["amount"], row["currency"]),
                 direction=LedgerDirection(row["direction"]),
                 reason=row["reason"],
-                created_at=row["created_at"]  # datetime from DB
+                created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else None,
             )
             for row in rows
         ]
@@ -664,33 +673,26 @@ class PaymentAttemptRepository:
         # TODO Day 3.
         
         with self.db.transaction() as conn:
-            attempt_id = conn.execute(
-                """
-                INSERT INTO payment_attempts 
-                (invoice_id, attempt_no, status, failure_reason, next_retry_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (invoice_id, attempt_no, status, failure_reason, 
-                next_retry_at.isoformat() if next_retry_at else None)
-            ).lastrowid
-        return attempt_id
+            attempt_id = q.insert_payment_attempt(
+                conn,
+                invoice_id,
+                attempt_no,
+                status,
+                failure_reason,
+                next_retry_at.isoformat() if next_retry_at else None,
+            )
+        return int(attempt_id)
 
     def list_for_invoice(self, invoice_id: int) -> list[dict]:
         # TODO Day 3.
 
         with self.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM payment_attempts WHERE invoice_id=? ORDER BY attempt_no",
-                (invoice_id,)
-            ).fetchall()
+            rows = q.select_attempts_for_invoice(conn, invoice_id)
         return [dict(row) for row in rows]
 
     def count_for_invoice(self, invoice_id: int) -> int:
         # TODO Day 3.
 
         with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM payment_attempts WHERE invoice_id=?",
-                (invoice_id,)
-            ).fetchone()
-        return row["cnt"]
+            count = q.count_attempts_for_invoice(conn, invoice_id)
+        return int(count)
